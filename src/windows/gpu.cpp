@@ -51,7 +51,7 @@ std::vector<GPU> getAllGPUs() {
     gpu._dedicated_memory_Bytes = static_cast<int64_t>(desc.DedicatedVideoMemory);
     gpu._shared_memory_Bytes = static_cast<int64_t>(desc.SharedSystemMemory);
 
-    char buffer[10];
+    char buffer[11];
     sprintf_s(buffer, "0x%04X", desc.VendorId);
     gpu._vendor_id = buffer;
     sprintf_s(buffer, "0x%04X", desc.DeviceId);
