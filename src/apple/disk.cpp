@@ -159,24 +159,6 @@ std::unordered_map<std::string, std::string> getBSDToMountPointMapping() {
   return mountMap;
 }
 
-/**
- * Retrieves the free disk space (in bytes) for a given mount point
- * by calling statfs().
- *
- * @param mountPoint The path at which the filesystem is mounted (e.g. "/")
- * @return The free space in bytes, or (uint64_t)-1 on error
- */
-uint64_t getFreeDiskSpace(const std::string& mountPoint) {
-  struct statfs fsStats;
-
-  if (statfs(mountPoint.c_str(), &fsStats) == 0) {
-    uint64_t freeSpace = static_cast<uint64_t>(fsStats.f_bavail) * fsStats.f_bsize;
-    return freeSpace;
-  } else {
-    return static_cast<uint64_t>(-1);
-  }
-}
-
 // Retrieves disk information using I/O Kit
 std::vector<Disk> getAllDisks() {
   std::vector<Disk> disks;
@@ -225,11 +207,7 @@ std::vector<Disk> getAllDisks() {
       if (!bsdName.empty()) {
         // Look up this BSD device in the mountMap
         if (auto it = mountMap.find(bsdName); it != mountMap.end()) {
-          // Get free space for the found mount point
-          const std::string& mountPoint = it->second;
-          disk._size_bytes = getFreeDiskSpace(mountPoint);
-
-          disk._mount_points.push_back(mountPoint);
+          disk._mount_points.push_back(it->second);
         }
       }
 
