@@ -10,6 +10,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <map>
 #include <vector>
 
@@ -48,8 +49,28 @@ std::string getDiskModel(const std::filesystem::path& path) {
 }
 
 // _____________________________________________________________________________________________________________________
+// SCSI VPD page 0x80 (Unit Serial Number): 4 byte header, bytes 2-3 hold the big-endian payload length.
+std::string read_vpd_serial(const std::filesystem::path& path) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) return {};
+
+  std::string page((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  if (page.size() < 4 || static_cast<unsigned char>(page[1]) != 0x80) return {};
+  std::size_t length = (static_cast<unsigned char>(page[2]) << 8) | static_cast<unsigned char>(page[3]);
+  std::string serial = page.substr(4, length);
+  for (char c : serial) {
+    if (c < 0x20 || c > 0x7e) return {};
+  }
+  hwinfo::utils::strip(serial);
+  return serial;
+}
+
+// _____________________________________________________________________________________________________________________
 std::string getDiskSerialNumber(const std::filesystem::path& path) {
+  // NVMe / MMC expose device/serial, virtio-blk exposes serial on the block device, SATA/SCSI only via VPD page 0x80.
   std::string result = read_file(path / "device/serial");
+  if (result.empty()) result = read_file(path / "serial");
+  if (result.empty()) result = read_vpd_serial(path / "device/vpd_pg80");
   if (result.empty()) {
     return "<unknown>";
   }
