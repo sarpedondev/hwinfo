@@ -190,10 +190,11 @@ std::vector<Disk> getAllDisks() {
           }
         }
       }
-      if (desc->BusType == BusTypeNvme) {
-        disk._serial_number = getNvmeControllerSerial(hDevice);
-      }
-      if (disk._serial_number.empty() && desc->SerialNumberOffset) {
+      // _serial_number defaults to "<unknown>", so the NVMe result is kept in a local to decide on the fallback.
+      const std::string nvmeSerial = desc->BusType == BusTypeNvme ? getNvmeControllerSerial(hDevice) : std::string();
+      if (!nvmeSerial.empty()) {
+        disk._serial_number = nvmeSerial;
+      } else if (desc->SerialNumberOffset) {
         disk._serial_number = buffer + desc->SerialNumberOffset;
       }
     }
