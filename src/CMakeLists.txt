@@ -279,13 +279,14 @@ if (HWINFO_NETWORK)
             apple/network.cpp
             linux/network.cpp
             windows/network.cpp
-
-            windows/utils/wmi_wrapper.cpp
     )
 
     add_library(hwinfo_network ${HWINFO_BUILD} ${NETWORK_SRC_FILES})
     hwinfo_configure_api(hwinfo_network)
     target_include_directories(hwinfo_network PUBLIC $<BUILD_INTERFACE:${HWINFO_INCLUDE_DIR}> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    if(WIN32)
+        target_link_libraries(hwinfo_network PRIVATE iphlpapi ws2_32)
+    endif()
 
 
 
