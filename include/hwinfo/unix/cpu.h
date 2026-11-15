@@ -13,6 +13,7 @@ struct CPU {
     std::uint64_t regular_frequency_hz = 0;
     std::uint64_t max_frequency_hz = 0;
     bool smt = false;
+    std::uint32_t threads = 1;
     std::vector<std::string> flags;
   };
   std::uint32_t socket_id;

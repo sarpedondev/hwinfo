@@ -5,6 +5,7 @@
 
 #ifdef HWINFO_UNIX
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -106,11 +107,41 @@ inline std::uint64_t read_cache_size(const std::string& path) {
   return 0;
 }
 
-inline bool has_smt(const std::string& core_path) {
-  std::string path = core_path + "/topology/thread_siblings_list";
-  std::ifstream tsf(path);
+// Counts the CPUs named by a sysfs CPU list. Sibling threads are numbered adjacently on some systems ("0-1") and
+// offset by the core count on others ("0,6"), so both ranges and comma separated entries have to be handled.
+inline std::uint32_t count_cpu_list(const std::string& list) {
+  std::uint32_t count = 0;
+  std::size_t pos = 0;
+  while (pos < list.size()) {
+    std::size_t end = list.find(',', pos);
+    if (end == std::string::npos) end = list.size();
+    const std::string entry = list.substr(pos, end - pos);
+    pos = end + 1;
+    try {
+      const std::size_t dash = entry.find('-');
+      if (dash == std::string::npos) {
+        std::stoul(entry);
+        count += 1;
+      } else {
+        const unsigned long first = std::stoul(entry.substr(0, dash));
+        const unsigned long last = std::stoul(entry.substr(dash + 1));
+        if (last >= first) count += static_cast<std::uint32_t>(last - first + 1);
+      }
+    } catch (const std::exception&) {
+      // skip malformed entries
+    }
+  }
+  return count;
+}
+
+// Number of hardware threads of the physical core the given logical CPU belongs to (at least 1).
+inline std::uint32_t thread_count(const std::string& core_path) {
+  std::ifstream tsf(core_path + "/topology/thread_siblings_list");
   std::string siblings;
-  return (tsf >> siblings && siblings.find_first_of('-') != std::string::npos);
+  if (!(tsf >> siblings)) {
+    return 1;
+  }
+  return std::max<std::uint32_t>(1, count_cpu_list(siblings));
 }
 
 namespace unix_os::cpu {
@@ -207,7 +238,8 @@ std::map<std::uint32_t, unix_os::cpu::CPU> parse_cpus(
         unix_os::cpu::CPU::Core& core = cpu.cores[core_id];
         const std::string core_path = "/sys/devices/system/cpu/cpu" + std::to_string(processor_id);
         core.id = processor_id;
-        core.smt = has_smt(core_path);
+        core.threads = thread_count(core_path);
+        core.smt = core.threads > 1;
         core.cache_bytes[0] = read_cache_size(core_path + "/cache/index0/size");
         core.cache_bytes[1] = read_cache_size(core_path + "/cache/index1/size");
         core.cache_bytes[2] = read_cache_size(core_path + "/cache/index2/size");
@@ -385,7 +417,7 @@ std::vector<CPU> getAllCPUs() {
           core.id, CPU::Cache{core.cache_bytes[0], core.cache_bytes[1], core.cache_bytes[2], core.cache_bytes[3]},
           core.regular_frequency_hz, core.max_frequency_hz, core.smt});
 
-      cpu._numLogicalCores += core.smt ? 2 : 1;
+      cpu._numLogicalCores += core.threads;
       cpu._numPhysicalCores += 1;
     }
     if (!parsed_cpu.cores.empty()) {
