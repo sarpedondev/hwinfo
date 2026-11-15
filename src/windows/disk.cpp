@@ -10,6 +10,10 @@
 #include <windows.h>
 #include <winioctl.h>
 
+#include <algorithm>
+#include <cctype>
+#include <cstddef>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -62,6 +66,83 @@ std::map<uint32_t, std::vector<std::string>> getDiskToVolumeMap() {
   return mapping;
 }
 
+// Reads the serial number from the NVMe Identify Controller data (bytes 4-23).
+//
+// STORAGE_DEVICE_DESCRIPTOR::SerialNumber is not the controller serial for NVMe: the inbox driver derives it from the
+// namespace EUI-64 / NGUID ("0025_3854_01B1_2F3A.") whenever the namespace has one, while vendor drivers report the
+// real serial. Identify Controller yields the same value on every driver, matching /sys/block/<dev>/device/serial.
+//
+// The protocol specific query types are declared locally, as older MinGW headers do not provide them.
+std::string getNvmeControllerSerial(HANDLE hDevice) {
+  struct ProtocolSpecificData {
+    DWORD ProtocolType;
+    DWORD DataType;
+    DWORD ProtocolDataRequestValue;
+    DWORD ProtocolDataRequestSubValue;
+    DWORD ProtocolDataOffset;
+    DWORD ProtocolDataLength;
+    DWORD FixedProtocolReturnData;
+    DWORD ProtocolDataRequestSubValue2;
+    DWORD ProtocolDataRequestSubValue3;
+    DWORD ProtocolDataRequestSubValue4;
+  };
+  struct ProtocolQuery {
+    DWORD PropertyId;
+    DWORD QueryType;
+    ProtocolSpecificData ProtocolSpecific;
+    BYTE IdentifyData[4096];
+  };
+  constexpr DWORD kStorageAdapterProtocolSpecificProperty = 49;
+  constexpr DWORD kStorageDeviceProtocolSpecificProperty = 50;
+  constexpr DWORD kPropertyStandardQuery = 0;
+  constexpr DWORD kProtocolTypeNvme = 3;
+  constexpr DWORD kNVMeDataTypeIdentify = 1;
+  constexpr DWORD kIdentifyCnsController = 1;
+  constexpr std::size_t kSerialOffset = 4;
+  constexpr std::size_t kSerialLength = 20;
+
+  // Identify Controller is addressed to the adapter; some drivers only answer the device scoped property.
+  ProtocolQuery query;
+  bool succeeded = false;
+  for (const DWORD propertyId : {kStorageAdapterProtocolSpecificProperty, kStorageDeviceProtocolSpecificProperty}) {
+    query = {};
+    query.PropertyId = propertyId;
+    query.QueryType = kPropertyStandardQuery;
+    query.ProtocolSpecific.ProtocolType = kProtocolTypeNvme;
+    query.ProtocolSpecific.DataType = kNVMeDataTypeIdentify;
+    query.ProtocolSpecific.ProtocolDataRequestValue = kIdentifyCnsController;
+    query.ProtocolSpecific.ProtocolDataOffset = sizeof(ProtocolSpecificData);
+    query.ProtocolSpecific.ProtocolDataLength = sizeof(query.IdentifyData);
+
+    DWORD bytesReturned = 0;
+    if (DeviceIoControl(hDevice, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), &query, sizeof(query),
+                        &bytesReturned, nullptr)) {
+      succeeded = true;
+      break;
+    }
+  }
+  if (!succeeded) {
+    return {};
+  }
+
+  // On return the buffer holds a STORAGE_PROTOCOL_DATA_DESCRIPTOR, whose Version / Size header has the same size as
+  // the PropertyId / QueryType header of the request. ProtocolDataOffset is relative to the protocol specific data.
+  const std::size_t dataOffset = offsetof(ProtocolQuery, ProtocolSpecific) + query.ProtocolSpecific.ProtocolDataOffset;
+  if (query.ProtocolSpecific.ProtocolDataLength < kSerialOffset + kSerialLength ||
+      dataOffset + kSerialOffset + kSerialLength > sizeof(query)) {
+    return {};
+  }
+
+  const char* data = reinterpret_cast<const char*>(&query) + dataOffset + kSerialOffset;
+  std::string serial(data, kSerialLength);
+  serial.erase(std::find(serial.begin(), serial.end(), '\0'), serial.end());
+  for (const char c : serial) {
+    if (c < 0x20 || c > 0x7e) return {};
+  }
+  hwinfo::utils::strip(serial);
+  return serial;
+}
+
 }  // namespace
 
 namespace hwinfo {
@@ -109,7 +190,10 @@ std::vector<Disk> getAllDisks() {
           }
         }
       }
-      if (desc->SerialNumberOffset) {
+      if (desc->BusType == BusTypeNvme) {
+        disk._serial_number = getNvmeControllerSerial(hDevice);
+      }
+      if (disk._serial_number.empty() && desc->SerialNumberOffset) {
         disk._serial_number = buffer + desc->SerialNumberOffset;
       }
     }
