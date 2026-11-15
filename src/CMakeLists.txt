@@ -107,6 +107,8 @@ if (HWINFO_DISK)
     target_include_directories(hwinfo_disk PUBLIC $<BUILD_INTERFACE:${HWINFO_INCLUDE_DIR}> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
     if(APPLE)
         target_link_libraries(hwinfo_disk PRIVATE "-framework IOKit" "-framework CoreFoundation")
+    elseif(WIN32)
+        target_link_libraries(hwinfo_disk PRIVATE setupapi cfgmgr32)
     endif()
 
 

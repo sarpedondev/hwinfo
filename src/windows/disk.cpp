@@ -8,6 +8,10 @@
 #include <hwinfo/disk.h>
 #include <hwinfo/utils/stringutils.h>
 #include <windows.h>
+// clang-format off
+#include <cfgmgr32.h>
+#include <setupapi.h>
+// clang-format on
 #include <winioctl.h>
 
 #include <algorithm>
@@ -64,6 +68,67 @@ std::map<uint32_t, std::vector<std::string>> getDiskToVolumeMap() {
     currentDrive += strlen(currentDrive) + 1;
   }
   return mapping;
+}
+
+// Returns true only if PhysicalDrive<diskNumber> sits directly on a controller driven by the Microsoft inbox NVMe
+// driver (stornvme). Vendor and RAID stacks (Intel RST/VMD iaStorVD, AMD rcraid, Samsung secnvme, ...) implement the
+// protocol specific pass-through themselves, and some of them corrupt the kernel pool when asked for Identify
+// Controller (seen as KERNEL_MODE_HEAP_CORRUPTION 0x13A with iaStorVD). Any lookup failure counts as "not inbox".
+bool isInboxNvmeController(DWORD diskNumber) {
+  // GUID_DEVINTERFACE_DISK, declared locally to avoid depending on INITGUID / libuuid.
+  static const GUID kDiskInterface = {0x53f56307, 0xb6bf, 0x11d0, {0x94, 0xf2, 0x00, 0xa0, 0xc9, 0x1e, 0xfb, 0x8b}};
+
+  HDEVINFO devInfo = SetupDiGetClassDevsW(&kDiskInterface, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+  if (devInfo == INVALID_HANDLE_VALUE) {
+    return false;
+  }
+
+  bool inbox = false;
+  SP_DEVICE_INTERFACE_DATA interfaceData = {};
+  interfaceData.cbSize = sizeof(interfaceData);
+  for (DWORD index = 0; SetupDiEnumDeviceInterfaces(devInfo, nullptr, &kDiskInterface, index, &interfaceData); ++index) {
+    DWORD required = 0;
+    SetupDiGetDeviceInterfaceDetailW(devInfo, &interfaceData, nullptr, 0, &required, nullptr);
+    if (required < sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)) {
+      continue;
+    }
+    std::vector<BYTE> detailBuffer(required);
+    auto* detail = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(detailBuffer.data());
+    detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
+    SP_DEVINFO_DATA devData = {};
+    devData.cbSize = sizeof(devData);
+    if (!SetupDiGetDeviceInterfaceDetailW(devInfo, &interfaceData, detail, required, nullptr, &devData)) {
+      continue;
+    }
+
+    HANDLE hDisk =
+        CreateFileW(detail->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hDisk == INVALID_HANDLE_VALUE) {
+      continue;
+    }
+    STORAGE_DEVICE_NUMBER sdn = {};
+    DWORD bytesReturned = 0;
+    const BOOL gotNumber =
+        DeviceIoControl(hDisk, IOCTL_STORAGE_GET_DEVICE_NUMBER, nullptr, 0, &sdn, sizeof(sdn), &bytesReturned, nullptr);
+    CloseHandle(hDisk);
+    if (!gotNumber || sdn.DeviceType != FILE_DEVICE_DISK || sdn.DeviceNumber != diskNumber) {
+      continue;
+    }
+
+    DEVINST parent = 0;
+    if (CM_Get_Parent(&parent, devData.DevInst, 0) == CR_SUCCESS) {
+      wchar_t service[64] = {};
+      ULONG size = sizeof(service);
+      if (CM_Get_DevNode_Registry_PropertyW(parent, CM_DRP_SERVICE, nullptr, service, &size, 0) == CR_SUCCESS) {
+        service[(sizeof(service) / sizeof(service[0])) - 1] = L'\0';
+        inbox = _wcsicmp(service, L"stornvme") == 0;
+      }
+    }
+    break;
+  }
+
+  SetupDiDestroyDeviceInfoList(devInfo);
+  return inbox;
 }
 
 // Reads the serial number from the NVMe Identify Controller data (bytes 4-23).
@@ -191,7 +256,11 @@ std::vector<Disk> getAllDisks() {
         }
       }
       // _serial_number defaults to "<unknown>", so the NVMe result is kept in a local to decide on the fallback.
-      const std::string nvmeSerial = desc->BusType == BusTypeNvme ? getNvmeControllerSerial(hDevice) : std::string();
+      // Identify Controller is only sent through the inbox driver; vendor drivers already report the real serial in the
+      // descriptor, and some of them crash the kernel on the pass-through (see isInboxNvmeController).
+      const std::string nvmeSerial = desc->BusType == BusTypeNvme && isInboxNvmeController(i)
+                                         ? getNvmeControllerSerial(hDevice)
+                                         : std::string();
       if (!nvmeSerial.empty()) {
         disk._serial_number = nvmeSerial;
       } else if (desc->SerialNumberOffset) {
